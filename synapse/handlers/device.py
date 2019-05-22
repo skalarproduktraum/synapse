@@ -441,10 +441,17 @@ class DeviceHandler(DeviceWorkerHandler):
     @defer.inlineCallbacks
     def on_federation_query_user_devices(self, user_id):
         stream_id, devices = yield self.store.get_devices_with_keys_by_user(user_id)
+        master_key = yield self.store.get_e2e_cross_signing_key(user_id, "master")
+        self_signing_key = yield self.store.get_e2e_cross_signing_key(
+            user_id, "self_signing"
+        )
+
         defer.returnValue({
             "user_id": user_id,
             "stream_id": stream_id,
             "devices": devices,
+            "master_key": master_key,
+            "self_signing_key": self_signing_key
         })
 
     @defer.inlineCallbacks

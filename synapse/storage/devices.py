@@ -79,7 +79,8 @@ class DeviceWorkerStore(SQLBaseStore):
         """Get stream of updates to send to remote servers
 
         Returns:
-            (int, list[dict]): current stream id and list of updates
+            (int, list[(string, dict)]): current stream id and list of updates,
+                where each update is a pair of EDU type and EDU contents
         """
         now_stream_id = self._device_list_id_gen.get_current_token()
 
@@ -100,6 +101,7 @@ class DeviceWorkerStore(SQLBaseStore):
     def _get_devices_by_remote_txn(
         self, txn, destination, from_stream_id, now_stream_id
     ):
+        # get the list of device updates that need to be sent
         sql = """
             SELECT user_id, device_id, max(stream_id) FROM device_lists_outbound_pokes
             WHERE destination = ? AND ? < stream_id AND stream_id <= ? AND sent = ?
@@ -108,10 +110,37 @@ class DeviceWorkerStore(SQLBaseStore):
         """
         txn.execute(sql, (destination, from_stream_id, now_stream_id, False))
 
-        # maps (user_id, device_id) -> stream_id
-        query_map = {(r[0], r[1]): r[2] for r in txn}
-        if not query_map:
-            return (now_stream_id, [])
+        update_list = [r for r in txn]
+
+        # get the cross-signing keys of the users the list
+        users = set(r[0] for r in update_list)
+        master_key_by_user = {}
+        self_signing_key_by_user = {}
+        for user in users:
+            cross_signing_key = self._get_e2e_device_signing_key_txn(txn, user, "master")
+            key_id, verify_key = get_verify_key_from_cross_signing_key(cross_signing_key)
+            master_key_by_user[user] = {
+                "key_info": cross_signing_key,
+                "pubkey": verify_key.version
+            }
+
+            cross_signing_key = self._get_e2e_device_signing_key_txn(
+                txn, user, "self_signing"
+            )
+            key_id, verify_key = get_verify_key_from_cross_signing_key(cross_signing_key)
+            self_signing_key_by_user[user] = {
+                "key_info": cross_signing_key,
+                "pubkey": verify_key.version
+            }
+
+        # maps (user_id, device_id) -> stream_id (removing all records
+        # corresponding to cross-signing keys)
+        query_map = {
+            (r[0], r[1]): r[2]
+            for r in update_list
+            if r[1] != master_key_by_user[r[0]]["pubkey"]
+            and r[1] != self_signing_key_by_user[r[0]]["pubkey"]
+        }
 
         if len(query_map) >= 20:
             now_stream_id = max(stream_id for stream_id in itervalues(query_map))
@@ -121,7 +150,7 @@ class DeviceWorkerStore(SQLBaseStore):
             query_map.keys(),
             include_all_devices=True,
             include_deleted_devices=True,
-        )
+        ) if query_map else {}
 
         prev_sent_id_sql = """
             SELECT coalesce(max(stream_id), 0) as stream_id
@@ -157,7 +186,25 @@ class DeviceWorkerStore(SQLBaseStore):
                 else:
                     result["deleted"] = True
 
-                results.append(result)
+                results.append(("m.device_list_update", result))
+
+        # figure out which cross-signing keys were changed by intersecting the
+        # update list with the master/self-signing key by user maps
+        cross_signing_keys_by_user = {}
+        for user_id, device_id, stream in update_list:
+            if device_id == master_key_by_user[user_id]["pubkey"]:
+                result = cross_signing_keys_by_user.setdefault(user_id, {})
+                result["master_key"] = \
+                    master_key_by_user[user_id]["key_info"]
+            elif device_id == self_signing_key_by_user[user_id]["pubkey"]:
+                result = cross_signing_keys_by_user.setdefault(user_id, {})
+                result["self_signing_key"] = \
+                    self_signing_key_by_user[user_id]["key_info"]
+
+        # add the updated cross-signing keys to the results list
+        for user_id, result in iteritems(cross_signing_keys_by_user):
+            result["user_id"] = user_id
+            results.append(("m.signing_key_update", result))
 
         return (now_stream_id, results)
 
