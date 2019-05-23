@@ -118,6 +118,8 @@ class DeviceWorkerStore(SQLBaseStore):
         self_signing_key_by_user = {}
         for user in users:
             cross_signing_key = self._get_e2e_device_signing_key_txn(txn, user, "master")
+            if not cross_signing_key:
+                continue
             key_id, verify_key = get_verify_key_from_cross_signing_key(cross_signing_key)
             master_key_by_user[user] = {
                 "key_info": cross_signing_key,
@@ -138,8 +140,10 @@ class DeviceWorkerStore(SQLBaseStore):
         query_map = {
             (r[0], r[1]): r[2]
             for r in update_list
-            if r[1] != master_key_by_user[r[0]]["pubkey"]
-            and r[1] != self_signing_key_by_user[r[0]]["pubkey"]
+            if (r[0] not in master_key_by_user
+                or r[1] != master_key_by_user[r[0]]["pubkey"])
+            and (r[0] not in self_signing_key_by_user
+                 or r[1] != self_signing_key_by_user[r[0]]["pubkey"])
         }
 
         if len(query_map) >= 20:
@@ -192,11 +196,13 @@ class DeviceWorkerStore(SQLBaseStore):
         # update list with the master/self-signing key by user maps
         cross_signing_keys_by_user = {}
         for user_id, device_id, stream in update_list:
-            if device_id == master_key_by_user[user_id]["pubkey"]:
+            if user_id in master_key_by_user \
+               and device_id == master_key_by_user[user_id]["pubkey"]:
                 result = cross_signing_keys_by_user.setdefault(user_id, {})
                 result["master_key"] = \
                     master_key_by_user[user_id]["key_info"]
-            elif device_id == self_signing_key_by_user[user_id]["pubkey"]:
+            elif user_id in self_signing_key_by_user \
+                    and device_id == self_signing_key_by_user[user_id]["pubkey"]:
                 result = cross_signing_keys_by_user.setdefault(user_id, {})
                 result["self_signing_key"] = \
                     self_signing_key_by_user[user_id]["key_info"]
