@@ -15,8 +15,6 @@
 
 import json
 
-from twisted.internet.defer import succeed
-
 from synapse.rest import admin
 from synapse.rest.client.v1 import login
 from synapse.rest.client.v2_alpha import account
